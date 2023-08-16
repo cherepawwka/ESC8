@@ -1,0 +1,122 @@
+query CertificationAuthority($ip, $fqdn) from Certification_Authority_hosts {
+    (
+        (ip != null and ip == $ip)
+        or (fqdn != null and fqdn == $fqdn)
+    )
+}
+
+event Successful_Computer_Login_on_CA:
+    key:
+        event_src.host
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4624"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+        and status == "success"
+        and match (subject.name, "*$")
+        and logon_service == "NtLmSsp"
+    }
+
+event CA_Certificate_Request:
+    key:
+        event_src.host
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4886"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+        and match (subject.name, "*$")
+    }
+
+event CA_Certificate_Issue:
+    key:
+        event_src.host
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4887"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+        and match (subject.name, "*$")
+    }
+    
+event CA_HTTP_connection:
+    key:
+        event_src.host
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "5156"
+        and exec_query("CertificationAuthority", [src.ip, event_src.host])
+        and src.port == 80
+        and direction == "ingress"
+        and action == "allow"
+        and status == "success"
+    }    
+    
+
+rule Successful_PetitPotam_ESC8_CA_Attack: (Successful_Computer_Login_on_CA and CA_Certificate_Request and CA_Certificate_Issue and CA_HTTP_connection) timer 1m
+
+    init {
+    	$labels = "w_auto"
+    }
+
+    on Successful_Computer_Login_on_CA {
+        $status = status
+        $logon_service = logon_service
+        $logon_type = logon_type
+        
+        $subject.name = subject.name
+        $subject.domain = subject.domain
+        $subject.id = subject.id
+        $subject.account.name = subject.account.name
+        $subject.account.domain = subject.account.domain
+        $subject.account.session_id = subject.account.session_id
+        $subject.account.id = subject.account.id
+
+        $event_src.host = event_src.host
+        $event_src.hostname = event_src.hostname
+        $event_src.fqdn = event_src.fqdn
+        $event_src.asset = event_src.asset
+        $event_src.title = event_src.title
+        $event_src.vendor = event_src.vendor
+    }
+
+    on CA_Certificate_Request {
+        $object = object
+        $object.property = object.property
+        $datafield1 = datafield1  # номер запроса сертификата
+    }
+    
+    on CA_HTTP_connection {
+    	$src.ip = dst.ip
+        $src.host = dst.host
+        $src.asset = dst.asset
+        $src.port = dst.port
+        
+        $dst.host = src.host
+        $dst.ip = src.ip
+        $dst.port = src.port
+        $dst.asset = src.asset
+    }
+
+    on CA_Certificate_Issue {
+    	$object.name = object.name
+        $object.id = object.id
+        $object.state = object.state
+
+        $alert.key = subject.name
+    }
+
+emit {
+    $correlation_type = "incident"
+    $incident.aggregation.key = join([$correlation_name, $subject.name, $src.ip], "|")
+    $incident.severity = "high"
+    $incident.category = "UserCompromising"
+    $incident.aggregation.timeout = 30m
+    
+    $subject = "account"
+    $action = "start"
+
+    $category.generic = "Attack"
+    $category.high = "Credential Access"
+    $category.low = "Forced Authentication"
+    
+    $importance = "high"
+}
